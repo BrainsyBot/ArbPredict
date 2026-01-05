@@ -1021,6 +1021,599 @@ class CircuitBreakerImpl implements CircuitBreaker {
 }
 ```
 
+### 3.9 Operating Modes
+
+#### Dry Run Mode
+
+**CRITICAL:** Always test with dry run mode before enabling live trading.
+
+```typescript
+type OperatingMode = 'dry_run' | 'live';
+
+interface DryRunConfig {
+  enabled: boolean;
+  logOpportunities: boolean;
+  simulateExecutions: boolean;
+  trackHypotheticalPnL: boolean;
+}
+
+const OPERATING_MODE_CONFIG = {
+  mode: process.env.TRADING_MODE as OperatingMode || 'dry_run',
+  dryRun: {
+    enabled: true,                // Default to dry run
+    logOpportunities: true,       // Log all detected opportunities
+    simulateExecutions: true,     // Simulate order execution timing
+    trackHypotheticalPnL: true,   // Track what we would have made
+  },
+};
+
+// Dry run execution - logs but doesn't trade
+async function executeArbitrageWithMode(opp: ArbitrageOpportunity): Promise<ExecutionResult> {
+  if (OPERATING_MODE_CONFIG.mode === 'dry_run') {
+    logger.info('[DRY RUN] Would execute arbitrage:', {
+      buyPlatform: opp.buyPlatform,
+      buyPrice: opp.buyPrice,
+      sellPlatform: opp.sellPlatform,
+      sellPrice: opp.sellPrice,
+      estimatedProfit: opp.netProfit,
+    });
+
+    // Track hypothetical P&L
+    if (OPERATING_MODE_CONFIG.dryRun.trackHypotheticalPnL) {
+      await trackHypotheticalTrade(opp);
+    }
+
+    return {
+      success: true,
+      buyExecution: null,
+      sellExecution: null,
+      actualProfit: opp.netProfit,  // Hypothetical
+      slippage: 0,
+      circuitBreakerTriggered: false,
+      dryRun: true,
+    };
+  }
+
+  // Live mode - actually execute
+  return executeArbitrage(opp);
+}
+
+// CLI flag: --dry-run or --live
+// Environment variable: TRADING_MODE=dry_run|live
+```
+
+### 3.10 Retry Logic
+
+#### Opportunity Retry Policy
+
+With $100 limits, we don't want to chase opportunities aggressively. Conservative retry policy:
+
+```typescript
+interface RetryPolicy {
+  maxRetries: number;
+  retryDelayMs: number;
+  backoffMultiplier: number;
+  maxRetryDelayMs: number;
+  retryableErrors: string[];
+}
+
+const RETRY_CONFIG: RetryPolicy = {
+  // Opportunity retries - VERY CONSERVATIVE
+  maxRetries: 1,                  // Only retry once (total 2 attempts)
+  retryDelayMs: 500,              // Wait 500ms before retry
+  backoffMultiplier: 1,           // No exponential backoff for opportunities
+  maxRetryDelayMs: 500,           // Cap at 500ms
+
+  // Only retry on these specific errors
+  retryableErrors: [
+    'NETWORK_TIMEOUT',            // Temporary network issue
+    'RATE_LIMIT_SOFT',            // Soft rate limit (throttled, not rejected)
+  ],
+};
+
+// API call retries - more aggressive since no financial risk
+const API_RETRY_CONFIG: RetryPolicy = {
+  maxRetries: 3,                  // 3 retries for API calls
+  retryDelayMs: 1000,             // Start with 1 second
+  backoffMultiplier: 2,           // Exponential backoff
+  maxRetryDelayMs: 8000,          // Cap at 8 seconds
+
+  retryableErrors: [
+    'NETWORK_TIMEOUT',
+    'RATE_LIMIT_SOFT',
+    'CONNECTION_RESET',
+    'HTTP_500',
+    'HTTP_502',
+    'HTTP_503',
+    'HTTP_504',
+  ],
+};
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  config: RetryPolicy,
+  context: string
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error as Error;
+
+      // Check if error is retryable
+      const isRetryable = config.retryableErrors.some(
+        errType => lastError?.message?.includes(errType)
+      );
+
+      if (!isRetryable || attempt === config.maxRetries) {
+        logger.error(`${context} failed after ${attempt + 1} attempts:`, lastError);
+        throw lastError;
+      }
+
+      const delay = Math.min(
+        config.retryDelayMs * Math.pow(config.backoffMultiplier, attempt),
+        config.maxRetryDelayMs
+      );
+
+      logger.warn(`${context} attempt ${attempt + 1} failed, retrying in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+
+  throw lastError;
+}
+
+// DO NOT RETRY these scenarios:
+// - FOK order rejection (opportunity is gone)
+// - Insufficient balance
+// - Invalid order parameters
+// - Rate limit hard rejection (HTTP 429)
+// - Authentication failure
+```
+
+### 3.11 Small Position Considerations ($100 Limit)
+
+**CRITICAL:** With $100 total capital, several factors become more significant:
+
+#### Minimum Trade Sizes
+
+```typescript
+const SMALL_POSITION_CONFIG = {
+  // Platform minimums
+  polymarket: {
+    minOrderSize: 1,              // 1 share minimum
+    minOrderValueUsd: 0.01,       // $0.01 minimum
+  },
+  kalshi: {
+    minOrderSize: 1,              // 1 contract minimum
+    minOrderValueUsd: 0.01,       // 1 cent minimum
+  },
+
+  // Our conservative minimums (higher than platform minimums)
+  minTradeValueUsd: 5,            // Don't trade less than $5 (fees eat profits)
+  minProfitUsd: 0.10,             // Minimum $0.10 profit to be worth executing
+
+  // Gas considerations (Polygon)
+  estimatedGasCostUsd: 0.01,      // ~$0.01 per transaction on Polygon
+  maxGasAsPercentOfTrade: 0.02,   // Gas should be <2% of trade value
+};
+
+// Validate trade is worth executing
+function isTradeWorthExecuting(opp: ArbitrageOpportunity, quantity: number): boolean {
+  const tradeValue = quantity * opp.buyPrice;
+  const estimatedProfit = quantity * opp.netProfit;
+  const estimatedGas = SMALL_POSITION_CONFIG.estimatedGasCostUsd * 2; // Buy + sell
+
+  // Check minimum trade value
+  if (tradeValue < SMALL_POSITION_CONFIG.minTradeValueUsd) {
+    logger.debug(`Trade value $${tradeValue} below minimum $${SMALL_POSITION_CONFIG.minTradeValueUsd}`);
+    return false;
+  }
+
+  // Check minimum profit
+  if (estimatedProfit < SMALL_POSITION_CONFIG.minProfitUsd) {
+    logger.debug(`Estimated profit $${estimatedProfit} below minimum $${SMALL_POSITION_CONFIG.minProfitUsd}`);
+    return false;
+  }
+
+  // Check gas as percentage of trade
+  const gasPercent = estimatedGas / tradeValue;
+  if (gasPercent > SMALL_POSITION_CONFIG.maxGasAsPercentOfTrade) {
+    logger.debug(`Gas cost ${(gasPercent * 100).toFixed(1)}% exceeds ${SMALL_POSITION_CONFIG.maxGasAsPercentOfTrade * 100}% threshold`);
+    return false;
+  }
+
+  // Check profit after gas
+  const profitAfterGas = estimatedProfit - estimatedGas;
+  if (profitAfterGas <= 0) {
+    logger.debug(`No profit after gas: $${profitAfterGas.toFixed(4)}`);
+    return false;
+  }
+
+  return true;
+}
+```
+
+#### Fee Impact at Small Scale
+
+| Trade Size | Fees (~2.5%) | Gas (~$0.02) | Net Fee % |
+|------------|--------------|--------------|-----------|
+| $5         | $0.125       | $0.02        | 2.9%      |
+| $10        | $0.25        | $0.02        | 2.7%      |
+| $20        | $0.50        | $0.02        | 2.6%      |
+| $50        | $1.25        | $0.02        | 2.54%     |
+| $100       | $2.50        | $0.02        | 2.52%     |
+
+**Recommendation:** With $100 limit, prefer fewer larger trades over many small trades.
+
+### 3.12 State Persistence
+
+State must persist across restarts to enforce daily limits and track positions.
+
+```typescript
+interface PersistedState {
+  // Daily tracking (resets at midnight UTC)
+  dailyPnL: number;
+  dailyTradeCount: number;
+  dailyVolumeUsd: number;
+  tradingDate: string;            // YYYY-MM-DD
+
+  // Circuit breaker state
+  circuitBreakerPaused: boolean;
+  circuitBreakerReason: string | null;
+  circuitBreakerPausedAt: string | null;
+
+  // Position tracking
+  openPositions: Position[];
+
+  // Last known state
+  lastHeartbeat: string;
+  lastSuccessfulTrade: string | null;
+}
+
+const STATE_FILE = './data/bot_state.json';
+
+class StateManager {
+  private state: PersistedState;
+
+  async load(): Promise<void> {
+    try {
+      const data = await fs.readFile(STATE_FILE, 'utf-8');
+      this.state = JSON.parse(data);
+
+      // Check if we need to reset daily counters
+      const today = new Date().toISOString().split('T')[0];
+      if (this.state.tradingDate !== today) {
+        logger.info(`New trading day: resetting daily counters`);
+        this.state.dailyPnL = 0;
+        this.state.dailyTradeCount = 0;
+        this.state.dailyVolumeUsd = 0;
+        this.state.tradingDate = today;
+      }
+
+      logger.info('State loaded:', {
+        dailyPnL: this.state.dailyPnL,
+        circuitBreakerPaused: this.state.circuitBreakerPaused,
+        openPositions: this.state.openPositions.length,
+      });
+    } catch (error) {
+      logger.info('No existing state file, starting fresh');
+      this.state = this.createInitialState();
+    }
+  }
+
+  async save(): Promise<void> {
+    this.state.lastHeartbeat = new Date().toISOString();
+    await fs.writeFile(STATE_FILE, JSON.stringify(this.state, null, 2));
+  }
+
+  // Auto-save every 30 seconds
+  startAutoSave(): void {
+    setInterval(() => this.save(), 30000);
+  }
+
+  private createInitialState(): PersistedState {
+    return {
+      dailyPnL: 0,
+      dailyTradeCount: 0,
+      dailyVolumeUsd: 0,
+      tradingDate: new Date().toISOString().split('T')[0],
+      circuitBreakerPaused: false,
+      circuitBreakerReason: null,
+      circuitBreakerPausedAt: null,
+      openPositions: [],
+      lastHeartbeat: new Date().toISOString(),
+      lastSuccessfulTrade: null,
+    };
+  }
+}
+```
+
+### 3.13 Crash Recovery
+
+**Policy:** Require manual review before resuming after crash.
+
+```typescript
+interface CrashRecoveryConfig {
+  requireManualReview: boolean;
+  queryPositionsOnStartup: boolean;
+  maxStateAgeMinutes: number;
+}
+
+const CRASH_RECOVERY_CONFIG: CrashRecoveryConfig = {
+  requireManualReview: true,      // ALWAYS require manual review
+  queryPositionsOnStartup: true,  // Check actual positions on both platforms
+  maxStateAgeMinutes: 60,         // Warn if state is >1 hour old
+};
+
+async function performStartupChecks(): Promise<StartupCheckResult> {
+  const checks: string[] = [];
+  const warnings: string[] = [];
+  let canAutoStart = true;
+
+  // 1. Load persisted state
+  const state = await stateManager.load();
+
+  // 2. Check state age
+  const stateAge = Date.now() - new Date(state.lastHeartbeat).getTime();
+  const stateAgeMinutes = stateAge / (1000 * 60);
+
+  if (stateAgeMinutes > CRASH_RECOVERY_CONFIG.maxStateAgeMinutes) {
+    warnings.push(`State is ${stateAgeMinutes.toFixed(0)} minutes old - may be stale`);
+    canAutoStart = false;
+  }
+
+  // 3. Check if circuit breaker was active
+  if (state.circuitBreakerPaused) {
+    checks.push(`Circuit breaker was paused: ${state.circuitBreakerReason}`);
+    canAutoStart = false;
+  }
+
+  // 4. Query actual positions from both platforms
+  if (CRASH_RECOVERY_CONFIG.queryPositionsOnStartup) {
+    const [polyPositions, kalshiPositions] = await Promise.all([
+      polymarketConnector.getPositions(),
+      kalshiConnector.getPositions(),
+    ]);
+
+    // Check for unexpected positions
+    const totalPositions = polyPositions.length + kalshiPositions.length;
+    if (totalPositions > 0) {
+      warnings.push(`Found ${totalPositions} open positions - manual review recommended`);
+      canAutoStart = false;
+    }
+
+    // Check for imbalanced positions
+    // (positions on one platform without matching hedge)
+    const imbalanced = findImbalancedPositions(polyPositions, kalshiPositions);
+    if (imbalanced.length > 0) {
+      checks.push(`Found ${imbalanced.length} imbalanced positions - MANUAL INTERVENTION REQUIRED`);
+      canAutoStart = false;
+    }
+  }
+
+  // 5. Check daily loss limit
+  if (state.dailyPnL < -RISK_PARAMS.dailyLossLimit) {
+    checks.push(`Daily loss limit reached: $${Math.abs(state.dailyPnL).toFixed(2)}`);
+    canAutoStart = false;
+  }
+
+  // Decision
+  if (CRASH_RECOVERY_CONFIG.requireManualReview && !canAutoStart) {
+    logger.error('=== MANUAL REVIEW REQUIRED ===');
+    logger.error('Checks:', checks);
+    logger.error('Warnings:', warnings);
+    logger.error('Run with --force to override (not recommended)');
+
+    return {
+      canStart: false,
+      requiresManualReview: true,
+      checks,
+      warnings,
+    };
+  }
+
+  return {
+    canStart: true,
+    requiresManualReview: false,
+    checks,
+    warnings,
+  };
+}
+```
+
+### 3.14 CLI Commands
+
+Simple command-line interface for manual control.
+
+```typescript
+// CLI Commands
+const CLI_COMMANDS = {
+  // Status commands
+  'status': 'Show bot status, positions, and P&L',
+  'health': 'Check connection health to both platforms',
+  'positions': 'List all open positions',
+  'balance': 'Show balances on both platforms',
+
+  // Control commands
+  'pause': 'Pause trading (trigger circuit breaker)',
+  'resume': 'Resume trading (clear circuit breaker)',
+  'dry-run': 'Switch to dry run mode',
+  'live': 'Switch to live mode (requires confirmation)',
+
+  // Debug commands
+  'opportunities': 'Show current arbitrage opportunities',
+  'config': 'Show current configuration',
+  'logs': 'Tail recent logs',
+};
+
+// Example CLI implementation
+async function handleCliCommand(command: string, args: string[]): Promise<string> {
+  switch (command) {
+    case 'status':
+      const state = stateManager.getState();
+      return `
+Bot Status:
+  Mode: ${OPERATING_MODE_CONFIG.mode}
+  Circuit Breaker: ${state.circuitBreakerPaused ? 'PAUSED' : 'Active'}
+  Daily P&L: $${state.dailyPnL.toFixed(2)}
+  Daily Trades: ${state.dailyTradeCount}
+  Open Positions: ${state.openPositions.length}
+      `.trim();
+
+    case 'pause':
+      circuitBreaker.pause('Manual pause via CLI');
+      return 'Trading paused';
+
+    case 'resume':
+      const checks = await performStartupChecks();
+      if (checks.canStart) {
+        circuitBreaker.resume();
+        return 'Trading resumed';
+      } else {
+        return `Cannot resume: ${checks.checks.join(', ')}`;
+      }
+
+    case 'live':
+      if (args[0] !== '--confirm') {
+        return 'WARNING: This will enable live trading with real money. Run "live --confirm" to proceed.';
+      }
+      OPERATING_MODE_CONFIG.mode = 'live';
+      return 'Switched to LIVE mode - real trades will be executed';
+
+    default:
+      return `Unknown command: ${command}. Available commands: ${Object.keys(CLI_COMMANDS).join(', ')}`;
+  }
+}
+
+// Start CLI interface
+function startCli(): void {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: 'arb> ',
+  });
+
+  rl.prompt();
+
+  rl.on('line', async (line) => {
+    const [command, ...args] = line.trim().split(' ');
+    if (command) {
+      const result = await handleCliCommand(command, args);
+      console.log(result);
+    }
+    rl.prompt();
+  });
+}
+```
+
+### 3.15 Telegram Alerts
+
+Simple Telegram bot for critical alerts.
+
+```typescript
+interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  chatId: string;
+  alertLevels: ('critical' | 'high' | 'medium')[];
+}
+
+const TELEGRAM_CONFIG: TelegramConfig = {
+  enabled: process.env.TELEGRAM_ENABLED === 'true',
+  botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  chatId: process.env.TELEGRAM_CHAT_ID || '',
+  alertLevels: ['critical', 'high'],  // Only critical and high alerts
+};
+
+class TelegramAlerter {
+  private readonly baseUrl: string;
+
+  constructor(config: TelegramConfig) {
+    this.baseUrl = `https://api.telegram.org/bot${config.botToken}`;
+  }
+
+  async sendAlert(level: 'critical' | 'high' | 'medium', message: string): Promise<void> {
+    if (!TELEGRAM_CONFIG.enabled) return;
+    if (!TELEGRAM_CONFIG.alertLevels.includes(level)) return;
+
+    const emoji = {
+      critical: '🚨',
+      high: '⚠️',
+      medium: 'ℹ️',
+    }[level];
+
+    const text = `${emoji} *ARB BOT ${level.toUpperCase()}*\n\n${message}`;
+
+    try {
+      await fetch(`${this.baseUrl}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CONFIG.chatId,
+          text: text,
+          parse_mode: 'Markdown',
+        }),
+      });
+    } catch (error) {
+      logger.error('Failed to send Telegram alert:', error);
+    }
+  }
+
+  // Pre-defined alert templates
+  async alertCircuitBreaker(reason: string): Promise<void> {
+    await this.sendAlert('critical',
+      `Circuit breaker triggered!\n\nReason: ${reason}\n\nBot is paused. Manual review required.`
+    );
+  }
+
+  async alertAsymmetricExecution(details: any): Promise<void> {
+    await this.sendAlert('critical',
+      `Asymmetric execution detected!\n\n` +
+      `Buy: ${details.buyResult}\n` +
+      `Sell: ${details.sellResult}\n\n` +
+      `IMMEDIATE ATTENTION REQUIRED`
+    );
+  }
+
+  async alertDailyLossLimit(loss: number): Promise<void> {
+    await this.sendAlert('critical',
+      `Daily loss limit reached!\n\nLoss: $${Math.abs(loss).toFixed(2)}\n\nTrading halted for today.`
+    );
+  }
+
+  async alertConnectionLost(platform: string): Promise<void> {
+    await this.sendAlert('high',
+      `Connection lost to ${platform}\n\nAttempting reconnection...`
+    );
+  }
+
+  async alertTradeExecuted(trade: any): Promise<void> {
+    await this.sendAlert('medium',
+      `Trade executed!\n\n` +
+      `Buy: ${trade.buyPlatform} @ $${trade.buyPrice}\n` +
+      `Sell: ${trade.sellPlatform} @ $${trade.sellPrice}\n` +
+      `Profit: $${trade.profit.toFixed(2)}`
+    );
+  }
+}
+
+// Setup instructions in config
+/*
+To set up Telegram alerts:
+1. Create a bot via @BotFather on Telegram
+2. Get your bot token
+3. Start a chat with your bot
+4. Get your chat ID via https://api.telegram.org/bot<TOKEN>/getUpdates
+5. Set environment variables:
+   TELEGRAM_ENABLED=true
+   TELEGRAM_BOT_TOKEN=your_bot_token
+   TELEGRAM_CHAT_ID=your_chat_id
+*/
+```
+
 ---
 
 ## 4. Data Models
@@ -1277,6 +1870,49 @@ latency:
   order_placement_max_ms: 1000
   end_to_end_max_ms: 2000
 
+# Operating mode
+operating_mode:
+  mode: "dry_run"                 # "dry_run" or "live" - ALWAYS start with dry_run
+  log_opportunities: true
+  simulate_executions: true
+  track_hypothetical_pnl: true
+
+# Retry configuration
+retry:
+  # Opportunity execution retries (conservative)
+  opportunity_max_retries: 1      # Only 1 retry for trade execution
+  opportunity_retry_delay_ms: 500
+  # API call retries (more aggressive)
+  api_max_retries: 3
+  api_initial_delay_ms: 1000
+  api_max_delay_ms: 8000
+  api_backoff_multiplier: 2
+
+# Small position settings
+small_position:
+  min_trade_value_usd: 5          # Don't trade less than $5
+  min_profit_usd: 0.10            # Minimum $0.10 profit
+  estimated_gas_cost_usd: 0.01    # Polygon gas estimate
+  max_gas_percent: 0.02           # Gas should be <2% of trade
+
+# State persistence
+state:
+  file_path: "./data/bot_state.json"
+  auto_save_interval_seconds: 30
+
+# Crash recovery
+crash_recovery:
+  require_manual_review: true     # ALWAYS require manual review after crash
+  query_positions_on_startup: true
+  max_state_age_minutes: 60
+
+# Telegram alerts
+telegram:
+  enabled: ${TELEGRAM_ENABLED:-false}
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+  alert_levels: ["critical", "high"]  # Only critical and high alerts
+
 # Monitoring
 monitoring:
   alert_on_execution_failure: true
@@ -1291,6 +1927,13 @@ database:
   name: arb_bot
   user: ${DB_USER}
   password: ${DB_PASSWORD}
+
+# Logging
+logging:
+  level: "info"                   # debug, info, warn, error
+  file: "./logs/arb_bot.log"
+  max_size_mb: 10
+  max_files: 5
 ```
 
 ---
@@ -1531,11 +2174,24 @@ const metrics = {
 ---
 
 *Last updated: January 2025*
-*Version: 2.0.0 - Conservative Edition*
+*Version: 2.1.0 - Conservative Edition*
 
 ---
 
 ## Changelog
+
+### v2.1.0 (January 2025)
+- Added Dry Run Mode with hypothetical P&L tracking
+- Added conservative retry logic (1 retry for trades, 3 for API calls)
+- Added small position considerations for $100 limit
+  - Minimum trade value: $5
+  - Minimum profit: $0.10
+  - Gas cost validation
+- Added state persistence across restarts
+- Added crash recovery with mandatory manual review
+- Added CLI commands for manual control
+- Added Telegram alerts for critical events
+- Added logging configuration
 
 ### v2.0.0 (January 2025)
 - Added regulatory disclaimer
