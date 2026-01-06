@@ -152,16 +152,26 @@ export class KalshiConnector implements BaseConnector {
     return new Promise((resolve) => {
       try {
         const wsUrl = `${config.kalshi.wsUrl}`;
-        this.ws = new WebSocket(wsUrl);
+
+        // Get auth headers for WebSocket connection
+        const method = 'GET';
+        const path = '/trade-api/ws/v2';
+        const authHeaders = getAuthHeaders(method, path);
+
+        // Connect with auth headers in the handshake
+        this.ws = new WebSocket(wsUrl, {
+          headers: {
+            'KALSHI-ACCESS-KEY': authHeaders['KALSHI-ACCESS-KEY'],
+            'KALSHI-ACCESS-SIGNATURE': authHeaders['KALSHI-ACCESS-SIGNATURE'],
+            'KALSHI-ACCESS-TIMESTAMP': authHeaders['KALSHI-ACCESS-TIMESTAMP'],
+          },
+        });
 
         this.ws.on('open', () => {
           this.wsConnected = true;
           this.reconnectAttempts = 0;
           this.lastHeartbeat = new Date();
           logger.info('WebSocket connected to Kalshi');
-
-          // Authenticate the WebSocket connection
-          this.authenticateWebSocket();
 
           resolve(true);
         });
@@ -198,30 +208,6 @@ export class KalshiConnector implements BaseConnector {
         resolve(false);
       }
     });
-  }
-
-  private authenticateWebSocket(): void {
-    if (!this.ws || !isAuthenticated()) return;
-
-    // For API key auth, we authenticate using signed headers
-    // The WebSocket auth command expects the same signature format
-    const method = 'GET';
-    const path = '/trade-api/ws/v2';
-
-    const authHeaders = getAuthHeaders(method, path);
-
-    const authMessage = {
-      id: this.wsMessageId++,
-      cmd: 'authenticate',
-      params: {
-        api_key: authHeaders['KALSHI-ACCESS-KEY'],
-        timestamp: authHeaders['KALSHI-ACCESS-TIMESTAMP'],
-        signature: authHeaders['KALSHI-ACCESS-SIGNATURE'],
-      },
-    };
-
-    this.ws.send(JSON.stringify(authMessage));
-    logger.debug('Sent WebSocket authentication');
   }
 
   private handleWebSocketMessage(data: string): void {
