@@ -81,11 +81,12 @@ describe('EventMatcher', () => {
     });
 
     it('should find fuzzy match with high similarity', async () => {
+      // Titles differ by just one character ('s' in Bitcoins) for >0.95 similarity
       const polyMarket = createPolyMarket({
-        title: 'Will Bitcoin hit $100,000 by end of 2025?',
+        title: 'Will Bitcoins reach 100k by end of 2025?',
       });
       const kalshiMarkets = [createKalshiMarket({
-        title: 'Will Bitcoin hit $100000 by end of 2025?',
+        title: 'Will Bitcoin reach 100k by end of 2025?',
       })];
 
       const mapping = await eventMatcher.findKalshiEquivalent(polyMarket, kalshiMarkets);
@@ -109,16 +110,20 @@ describe('EventMatcher', () => {
     });
 
     it('should reject match when dates do not align', async () => {
+      // Use fuzzy matching titles (not exact) so date validation kicks in
+      // Titles differ by just one character ('s' in Bitcoins) for >0.95 similarity
       const polyMarket = createPolyMarket({
+        title: 'Will Bitcoins reach 100k by end of 2025?',
         endDate: new Date('2025-12-31'),
       });
       const kalshiMarkets = [createKalshiMarket({
-        title: 'Will Bitcoin reach $100k by end of 2025?',
-        expirationTime: new Date('2026-06-30'), // Different date
+        title: 'Will Bitcoin reach 100k by end of 2025?',
+        expirationTime: new Date('2026-06-30'), // Different date - outside 24h tolerance
       })];
 
       const mapping = await eventMatcher.findKalshiEquivalent(polyMarket, kalshiMarkets);
 
+      // Should be null because dates don't align (fuzzy match requires date validation)
       expect(mapping).toBeNull();
     });
 
