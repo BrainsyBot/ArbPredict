@@ -105,7 +105,7 @@ describe('ArbitrageDetector', () => {
       expect(opportunity?.sellPlatform).toBe('kalshi');
       expect(opportunity?.buyPrice).toBe(0.42);
       expect(opportunity?.sellPrice).toBe(0.50);
-      expect(opportunity?.grossSpread).toBe(0.08);
+      expect(opportunity?.grossSpread).toBeCloseTo(0.08);
     });
 
     it('should detect opportunity when Kalshi is cheaper', () => {
@@ -176,7 +176,7 @@ describe('calculateProfitDetails', () => {
   it('should calculate correct profit for polymarket buy, kalshi sell', () => {
     const result = calculateProfitDetails('polymarket', 'kalshi', 0.45, 0.55, 10);
 
-    expect(result.grossProfit).toBe(1.0); // (0.55 - 0.45) * 10
+    expect(result.grossProfit).toBeCloseTo(1.0); // (0.55 - 0.45) * 10
     expect(result.polymarketFees).toBeGreaterThan(0);
     expect(result.kalshiFees).toBeGreaterThan(0);
     expect(result.netProfit).toBeLessThan(result.grossProfit);
@@ -185,7 +185,7 @@ describe('calculateProfitDetails', () => {
   it('should calculate correct profit for kalshi buy, polymarket sell', () => {
     const result = calculateProfitDetails('kalshi', 'polymarket', 0.45, 0.55, 10);
 
-    expect(result.grossProfit).toBe(1.0);
+    expect(result.grossProfit).toBeCloseTo(1.0);
     expect(result.netProfit).toBeLessThan(result.grossProfit);
   });
 
