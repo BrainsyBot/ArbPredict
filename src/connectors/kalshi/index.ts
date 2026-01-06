@@ -113,12 +113,32 @@ export class KalshiConnector implements BaseConnector {
           return true;
         } catch (innerError: unknown) {
           // Log detailed error info
-          const axiosError = innerError as { response?: { status?: number; data?: unknown }; message?: string };
-          logger.error('Kalshi API request failed', {
-            status: axiosError.response?.status,
-            data: axiosError.response?.data,
-            message: axiosError.message,
-          });
+          const axiosError = innerError as {
+            response?: { status?: number; data?: unknown; headers?: unknown };
+            request?: unknown;
+            message?: string;
+            code?: string;
+          };
+
+          if (axiosError.response) {
+            // Server responded with error status
+            logger.error('Kalshi API returned error', {
+              status: axiosError.response.status,
+              data: JSON.stringify(axiosError.response.data),
+              message: axiosError.message,
+            });
+          } else if (axiosError.request) {
+            // Request was made but no response received
+            logger.error('Kalshi API no response received', {
+              code: axiosError.code,
+              message: axiosError.message,
+            });
+          } else {
+            // Error setting up request
+            logger.error('Kalshi API request setup failed', {
+              message: axiosError.message,
+            });
+          }
           throw innerError;
         }
       }
