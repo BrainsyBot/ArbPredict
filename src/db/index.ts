@@ -80,11 +80,24 @@ export async function transaction<T>(
 
 export async function testConnection(): Promise<boolean> {
   try {
+    const config = getConfig();
+    logger.info('Attempting database connection', {
+      host: config.database.host,
+      port: config.database.port,
+      database: config.database.name,
+      user: config.database.user,
+      ssl: config.database.host.includes('supabase') ? 'enabled' : 'disabled',
+    });
     const result = await query('SELECT NOW() as now');
     logger.info('Database connection successful', { serverTime: result.rows[0] });
     return true;
   } catch (error) {
-    logger.error('Database connection failed', { error: (error as Error).message });
+    const err = error as Error & { code?: string };
+    logger.error('Database connection failed', {
+      error: err.message,
+      code: err.code,
+      stack: err.stack?.split('\n')[0],
+    });
     return false;
   }
 }
