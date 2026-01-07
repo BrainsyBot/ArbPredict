@@ -479,63 +479,41 @@ export class KalshiConnector implements BaseConnector {
 
   /**
    * Get all markets from events matching specific categories
-   * Uses efficient approach: fetch events once, fetch markets once, join in memory
-   * Only 2 API calls regardless of how many events/markets
+   * Uses event_ticker filter to get only political markets (avoids sports flood)
+   * Makes N API calls where N = number of matching events (capped at maxEvents)
    */
-  async getMarketsByCategories(categories: string[], maxMarkets: number = 500): Promise<KalshiMarket[]> {
+  async getMarketsByCategories(categories: string[], maxEvents: number = 50): Promise<KalshiMarket[]> {
     try {
       // Step 1: Get all events (single API call)
       const events = await this.getEvents();
 
-      // Build a map of event_ticker -> category for matching events
-      const eventCategoryMap = new Map<string, string>();
-      const matchingEventTickers = new Set<string>();
+      // Filter to matching categories
+      const matchingEvents = events.filter(e =>
+        categories.some(cat =>
+          e.category?.toLowerCase().includes(cat.toLowerCase())
+        )
+      );
 
-      for (const event of events) {
-        const matches = categories.some(cat =>
-          event.category?.toLowerCase().includes(cat.toLowerCase())
-        );
-        if (matches) {
-          eventCategoryMap.set(event.event_ticker, event.category);
-          matchingEventTickers.add(event.event_ticker);
-        }
-      }
+      logger.info(`Found ${matchingEvents.length} events matching categories: ${categories.slice(0, 5).join(', ')}...`);
 
-      logger.info(`Found ${matchingEventTickers.size} events matching categories: ${categories.slice(0, 5).join(', ')}...`);
-
-      if (matchingEventTickers.size === 0) {
+      if (matchingEvents.length === 0) {
         return [];
       }
 
-      // Debug: Show sample event tickers we're looking for
-      const sampleEventTickers = Array.from(matchingEventTickers).slice(0, 5);
-      logger.info(`Sample event tickers to match: ${sampleEventTickers.join(', ')}`);
+      // Cap the number of events to limit API calls
+      const eventsToFetch = matchingEvents.slice(0, maxEvents);
+      logger.info(`Fetching markets for ${eventsToFetch.length} political events (${eventsToFetch.length} API calls)...`);
 
-      // Step 2: Get all markets (paginated but efficient)
-      const allMarkets = await this.getMarkets('open', maxMarkets);
+      // Step 2: Fetch markets for each political event
+      const allMarkets: KalshiMarket[] = [];
 
-      // Debug: Show sample market eventTickers
-      const sampleMarketEventTickers = [...new Set(allMarkets.slice(0, 20).map(m => m.eventTicker).filter(Boolean))];
-      logger.info(`Sample market eventTickers: ${sampleMarketEventTickers.length > 0 ? sampleMarketEventTickers.join(', ') : '(all empty)'}`);
+      for (const event of eventsToFetch) {
+        const markets = await this.getMarketsByEvent(event.event_ticker, event.category);
+        allMarkets.push(...markets);
+      }
 
-      // Check how many markets have eventTicker set
-      const marketsWithEventTicker = allMarkets.filter(m => m.eventTicker && m.eventTicker.length > 0);
-      logger.info(`Markets with eventTicker set: ${marketsWithEventTicker.length}/${allMarkets.length}`);
-
-      // Step 3: Filter markets by event_ticker and attach category (in memory, no API calls)
-      const filteredMarkets = allMarkets
-        .filter(m => matchingEventTickers.has(m.eventTicker))
-        .map(m => {
-          // Attach category from the event
-          const category = eventCategoryMap.get(m.eventTicker);
-          if (category) {
-            m.category = category;
-          }
-          return m;
-        });
-
-      logger.info(`Filtered to ${filteredMarkets.length} political markets from ${allMarkets.length} total (2 API calls)`);
-      return filteredMarkets;
+      logger.info(`Fetched ${allMarkets.length} political markets from ${eventsToFetch.length} events`);
+      return allMarkets;
     } catch (error) {
       logger.error('Failed to get markets by categories', { error: (error as Error).message });
       return [];
