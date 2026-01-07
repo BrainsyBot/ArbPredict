@@ -472,37 +472,51 @@ export class KalshiConnector implements BaseConnector {
 
   /**
    * Get all markets from events matching specific categories
-   * This fetches events first, then gets markets for each matching event
+   * Uses efficient approach: fetch events once, fetch markets once, join in memory
+   * Only 2 API calls regardless of how many events/markets
    */
-  async getMarketsByCategories(categories: string[]): Promise<KalshiMarket[]> {
+  async getMarketsByCategories(categories: string[], maxMarkets: number = 500): Promise<KalshiMarket[]> {
     try {
-      // Get all events
+      // Step 1: Get all events (single API call)
       const events = await this.getEvents();
 
-      // Filter to matching categories (case-insensitive)
-      const matchingEvents = events.filter(e =>
-        categories.some(cat =>
-          e.category?.toLowerCase().includes(cat.toLowerCase())
-        )
-      );
+      // Build a map of event_ticker -> category for matching events
+      const eventCategoryMap = new Map<string, string>();
+      const matchingEventTickers = new Set<string>();
 
-      logger.info(`Found ${matchingEvents.length} events matching categories: ${categories.join(', ')}`);
-
-      // Fetch markets for each matching event
-      const allMarkets: KalshiMarket[] = [];
-
-      for (const event of matchingEvents) {
-        const markets = await this.getMarketsByEvent(event.event_ticker, event.category);
-        allMarkets.push(...markets);
-
-        // Rate limit between event fetches
-        if (matchingEvents.indexOf(event) < matchingEvents.length - 1) {
-          await this.readRateLimiter.waitForSlot();
+      for (const event of events) {
+        const matches = categories.some(cat =>
+          event.category?.toLowerCase().includes(cat.toLowerCase())
+        );
+        if (matches) {
+          eventCategoryMap.set(event.event_ticker, event.category);
+          matchingEventTickers.add(event.event_ticker);
         }
       }
 
-      logger.info(`Fetched ${allMarkets.length} markets from ${matchingEvents.length} events`);
-      return allMarkets;
+      logger.info(`Found ${matchingEventTickers.size} events matching categories: ${categories.slice(0, 5).join(', ')}...`);
+
+      if (matchingEventTickers.size === 0) {
+        return [];
+      }
+
+      // Step 2: Get all markets (paginated but efficient)
+      const allMarkets = await this.getMarkets('open', maxMarkets);
+
+      // Step 3: Filter markets by event_ticker and attach category (in memory, no API calls)
+      const filteredMarkets = allMarkets
+        .filter(m => matchingEventTickers.has(m.eventTicker))
+        .map(m => {
+          // Attach category from the event
+          const category = eventCategoryMap.get(m.eventTicker);
+          if (category) {
+            m.category = category;
+          }
+          return m;
+        });
+
+      logger.info(`Filtered to ${filteredMarkets.length} political markets from ${allMarkets.length} total (2 API calls)`);
+      return filteredMarkets;
     } catch (error) {
       logger.error('Failed to get markets by categories', { error: (error as Error).message });
       return [];

@@ -3,7 +3,7 @@ import { getKalshiConnector } from '../connectors/kalshi/index.js';
 import { getEventMatcher } from '../core/event-matcher.js';
 import { testConnection, closePool } from '../db/index.js';
 import { createChildLogger } from '../utils/logger.js';
-import { normalize, levenshteinSimilarity } from '../utils/helpers.js';
+import { normalize, levenshteinSimilarity, combinedSimilarity, tokenSimilarity } from '../utils/helpers.js';
 import type { PolymarketMarket, KalshiMarket } from '../types/index.js';
 
 const logger = createChildLogger('auto-discover');
@@ -180,16 +180,16 @@ async function fetchPolymarketMarkets(category?: string): Promise<PolymarketMark
 
 /**
  * Simple matching function for dry-run mode (no database required)
- * Uses a lower threshold than production to find potential matches
+ * Uses combined similarity (Levenshtein + token-based with synonyms)
  */
 function findMatchDryRun(
   polymarket: PolymarketMarket,
   kalshiMarkets: KalshiMarket[],
   minSimilarity: number = 0.5  // Lower threshold for discovery
-): { kalshiTicker: string; confidence: number; kalshiTitle: string } | null {
+): { kalshiTicker: string; confidence: number; kalshiTitle: string; matchType: string } | null {
   const normalizedPolyTitle = normalize(polymarket.title);
 
-  let bestMatch: { kalshiTicker: string; confidence: number; kalshiTitle: string } | null = null;
+  let bestMatch: { kalshiTicker: string; confidence: number; kalshiTitle: string; matchType: string } | null = null;
   let bestSimilarity = 0;
 
   for (const kalshi of kalshiMarkets) {
@@ -197,14 +197,18 @@ function findMatchDryRun(
 
     // Exact match
     if (normalizedPolyTitle === normalizedKalshiTitle) {
-      return { kalshiTicker: kalshi.ticker, confidence: 1.0, kalshiTitle: kalshi.title };
+      return { kalshiTicker: kalshi.ticker, confidence: 1.0, kalshiTitle: kalshi.title, matchType: 'exact' };
     }
 
-    // Fuzzy match - track best match
-    const similarity = levenshteinSimilarity(normalizedPolyTitle, normalizedKalshiTitle);
+    // Combined similarity (uses both Levenshtein and token-based with synonyms)
+    const similarity = combinedSimilarity(polymarket.title, kalshi.title);
     if (similarity > bestSimilarity) {
       bestSimilarity = similarity;
-      bestMatch = { kalshiTicker: kalshi.ticker, confidence: similarity, kalshiTitle: kalshi.title };
+      // Determine which method gave the higher score
+      const levenshtein = levenshteinSimilarity(normalizedPolyTitle, normalizedKalshiTitle);
+      const token = tokenSimilarity(polymarket.title, kalshi.title);
+      const matchType = token > levenshtein ? 'token' : 'levenshtein';
+      bestMatch = { kalshiTicker: kalshi.ticker, confidence: similarity, kalshiTitle: kalshi.title, matchType };
     }
   }
 
@@ -471,15 +475,18 @@ if (process.argv[1]?.includes('auto-discover')) {
         console.log('');
       }
 
-      // Show best matches for first 10 Polymarket markets
+      // Show best matches for first 15 Polymarket markets
       console.log('=== BEST POTENTIAL MATCHES ===');
+      console.log('(Using combined Levenshtein + token-based matching with synonym expansion)\n');
       let matchCount = 0;
       polymarkets.slice(0, 15).forEach((pm, i) => {
         const bestMatch = findMatchDryRun(pm, kalshiMarkets, 0.3); // 30% threshold for preview
         if (bestMatch) {
           matchCount++;
-          console.log(`\n${i + 1}. Polymarket: "${pm.title.substring(0, 55)}..."`);
-          console.log(`   Best Kalshi (${(bestMatch.confidence * 100).toFixed(0)}%): "${bestMatch.kalshiTitle.substring(0, 55)}..."`);
+          const confStr = `${(bestMatch.confidence * 100).toFixed(0)}%`;
+          const typeStr = bestMatch.matchType === 'token' ? '🔤' : '📝';
+          console.log(`${i + 1}. [${confStr}] ${typeStr} Poly: "${pm.title.substring(0, 50)}..."`);
+          console.log(`           Kalshi: "${bestMatch.kalshiTitle.substring(0, 50)}..."`);
         }
       });
 
