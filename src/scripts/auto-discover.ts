@@ -264,22 +264,17 @@ async function fetchKalshiMarkets(category?: string): Promise<KalshiMarket[]> {
     const relevantEventTickers = new Set(relevantEvents.map(e => e.event_ticker));
     logger.debug(`Looking for event tickers like: ${Array.from(relevantEventTickers).slice(0, 5).join(', ')}`);
 
+    // Log sample market's eventTicker for debugging
+    if (allMarkets.length > 0) {
+      logger.debug(`Sample market eventTicker: "${allMarkets[0].eventTicker}", ticker: "${allMarkets[0].ticker}"`);
+    }
+
     let filtered = allMarkets.filter(m => {
-      // Check if market's event_ticker field matches (if it exists)
-      const marketEventTicker = (m as unknown as { event_ticker?: string }).event_ticker;
-      if (marketEventTicker && relevantEventTickers.has(marketEventTicker)) {
-        return true;
-      }
-
-      // Check if market ticker starts with any event ticker
-      for (const eventTicker of relevantEventTickers) {
-        if (m.ticker.startsWith(eventTicker)) {
-          return true;
-        }
-      }
-
-      return false;
+      // Check if market's eventTicker matches one of the political events
+      return relevantEventTickers.has(m.eventTicker);
     });
+
+    logger.debug(`Filtered to ${filtered.length} markets by eventTicker`);
 
     // If no matches by event ticker, try category-based filtering
     if (filtered.length === 0) {
