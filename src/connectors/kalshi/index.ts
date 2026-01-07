@@ -352,10 +352,11 @@ export class KalshiConnector implements BaseConnector {
     return this.lastHeartbeat;
   }
 
-  async getMarkets(status: 'open' | 'closed' | 'settled' = 'open'): Promise<KalshiMarket[]> {
+  async getMarkets(status: 'open' | 'closed' | 'settled' = 'open', maxResults?: number): Promise<KalshiMarket[]> {
     const config = getConfig();
     const allMarkets: KalshiMarket[] = [];
     let cursor: string | undefined;
+    let pageCount = 0;
 
     try {
       do {
@@ -376,9 +377,21 @@ export class KalshiConnector implements BaseConnector {
         const markets = response.data.markets.map(this.transformMarket);
         allMarkets.push(...markets);
         cursor = response.data.cursor;
+        pageCount++;
+
+        // Log progress for large fetches
+        if (pageCount % 5 === 0) {
+          logger.debug(`Fetched ${allMarkets.length} Kalshi markets so far...`);
+        }
+
+        // Stop if we've reached the max results
+        if (maxResults && allMarkets.length >= maxResults) {
+          logger.debug(`Reached max results limit (${maxResults}), stopping pagination`);
+          break;
+        }
       } while (cursor);
 
-      return allMarkets;
+      return maxResults ? allMarkets.slice(0, maxResults) : allMarkets;
     } catch (error) {
       logger.error('Failed to get markets', { error: (error as Error).message });
       throw error;

@@ -3,6 +3,7 @@ import { getKalshiConnector } from '../connectors/kalshi/index.js';
 import { getEventMatcher } from '../core/event-matcher.js';
 import { testConnection, closePool } from '../db/index.js';
 import { createChildLogger } from '../utils/logger.js';
+import { normalize, levenshteinSimilarity } from '../utils/helpers.js';
 import type { PolymarketMarket, KalshiMarket } from '../types/index.js';
 
 const logger = createChildLogger('auto-discover');
@@ -178,6 +179,34 @@ async function fetchPolymarketMarkets(category?: string): Promise<PolymarketMark
 }
 
 /**
+ * Simple matching function for dry-run mode (no database required)
+ */
+function findMatchDryRun(
+  polymarket: PolymarketMarket,
+  kalshiMarkets: KalshiMarket[],
+  minSimilarity: number = 0.7
+): { kalshiTicker: string; confidence: number } | null {
+  const normalizedPolyTitle = normalize(polymarket.title);
+
+  for (const kalshi of kalshiMarkets) {
+    const normalizedKalshiTitle = normalize(kalshi.title);
+
+    // Exact match
+    if (normalizedPolyTitle === normalizedKalshiTitle) {
+      return { kalshiTicker: kalshi.ticker, confidence: 1.0 };
+    }
+
+    // Fuzzy match
+    const similarity = levenshteinSimilarity(normalizedPolyTitle, normalizedKalshiTitle);
+    if (similarity >= minSimilarity) {
+      return { kalshiTicker: kalshi.ticker, confidence: similarity };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Fetch markets from Kalshi API
  */
 async function fetchKalshiMarkets(category?: string): Promise<KalshiMarket[]> {
@@ -193,8 +222,8 @@ async function fetchKalshiMarkets(category?: string): Promise<KalshiMarket[]> {
       }
     }
 
-    logger.info('Fetching Kalshi markets (this may take a moment)...');
-    const markets = await connector.getMarkets('open');
+    logger.info('Fetching Kalshi markets (limiting to 500 for speed)...');
+    const markets = await connector.getMarkets('open', 500);  // Limit to 500 markets for faster discovery
     logger.info(`Kalshi returned ${markets.length} total markets`);
 
     // Filter by category if specified
@@ -224,11 +253,15 @@ export async function autoDiscoverMappings(options: {
 
   logger.info('Starting auto-discovery...', { category, dryRun });
 
-  // Test database connection
-  const dbConnected = await testConnection();
-  if (!dbConnected) {
-    logger.error('Database connection failed');
-    return { found: 0, added: 0 };
+  // Test database connection (skip in dry-run mode)
+  if (!dryRun) {
+    const dbConnected = await testConnection();
+    if (!dbConnected) {
+      logger.error('Database connection failed');
+      return { found: 0, added: 0 };
+    }
+  } else {
+    logger.info('Dry-run mode: skipping database connection');
   }
 
   // Fetch markets from both platforms
@@ -246,30 +279,34 @@ export async function autoDiscoverMappings(options: {
 
   // Use event matcher to find matches
   const eventMatcher = getEventMatcher();
-  await eventMatcher.loadMappings();
+  if (!dryRun) {
+    await eventMatcher.loadMappings();
+  }
 
   let found = 0;
   let added = 0;
 
   for (const polymarket of polymarketMarkets) {
-    // Check if already mapped
-    const existingMapping = eventMatcher.getMapping(polymarket.conditionId);
-    if (existingMapping) {
-      logger.debug(`Already mapped: ${polymarket.title.substring(0, 50)}...`);
-      continue;
-    }
+    if (dryRun) {
+      // Dry-run mode: use simple matching without database
+      const match = findMatchDryRun(polymarket, kalshiMarkets);
+      if (match) {
+        found++;
+        logger.info(`[DRY RUN] Would match: "${polymarket.title.substring(0, 40)}..." → ${match.kalshiTicker} (${(match.confidence * 100).toFixed(1)}% confidence)`);
+      }
+    } else {
+      // Normal mode: use event matcher with database
+      const existingMapping = eventMatcher.getMapping(polymarket.conditionId);
+      if (existingMapping) {
+        logger.debug(`Already mapped: ${polymarket.title.substring(0, 50)}...`);
+        continue;
+      }
 
-    // Try to find a Kalshi match
-    const mapping = await eventMatcher.findKalshiEquivalent(polymarket, kalshiMarkets);
-
-    if (mapping) {
-      found++;
-
-      if (!dryRun) {
+      const mapping = await eventMatcher.findKalshiEquivalent(polymarket, kalshiMarkets);
+      if (mapping) {
+        found++;
         added++;
         logger.info(`✓ Matched: "${polymarket.title.substring(0, 40)}..." → ${mapping.kalshiTicker} (${(mapping.matchConfidence * 100).toFixed(1)}% confidence)`);
-      } else {
-        logger.info(`[DRY RUN] Would match: "${polymarket.title.substring(0, 40)}..." → ${mapping.kalshiTicker} (${(mapping.matchConfidence * 100).toFixed(1)}% confidence)`);
       }
     }
   }
@@ -307,13 +344,16 @@ export async function listCategories(): Promise<void> {
 
 // Run if called directly
 if (process.argv[1]?.includes('auto-discover')) {
-  const category = process.argv[2] || undefined;
-  const dryRun = process.argv.includes('--dry-run');
+  const args = process.argv.slice(2);
+  const dryRun = args.includes('--dry-run');
+  const category = args.filter(a => !a.startsWith('--'))[0] || undefined;
 
   autoDiscoverMappings({ category, dryRun })
-    .then(result => {
+    .then(async result => {
       console.log(`\nResults: ${result.found} found, ${result.added} added`);
-      return closePool();
+      if (!dryRun) {
+        await closePool();
+      }
     })
     .catch(error => {
       console.error('Auto-discovery failed:', error);
