@@ -90,17 +90,36 @@ async function fetchPolymarketMarkets(category?: string): Promise<PolymarketMark
 
     // Log first market for debugging
     if (rawMarkets.length > 0) {
-      logger.debug(`Sample market keys: ${Object.keys(rawMarkets[0]).join(', ')}`);
+      const sample = rawMarkets[0];
+      logger.debug(`Sample market keys: ${Object.keys(sample).join(', ')}`);
+      logger.debug(`Sample market: question="${sample.question}", active=${sample.active}, closed=${sample.closed}`);
     }
 
-    const markets: PolymarketMarket[] = rawMarkets
-      .filter(m => m.active && !m.closed)
-      .filter(m => {
-        if (!category) return true;
-        const text = `${m.question || ''} ${m.description || ''}`.toLowerCase();
-        return text.includes(category.toLowerCase());
-      })
-      .map(m => {
+    // Filter markets - be lenient with active/closed if fields don't exist
+    const activeMarkets = rawMarkets.filter(m => {
+      // If active field exists, check it; otherwise assume active
+      const isActive = m.active === undefined ? true : m.active;
+      // If closed field exists, check it; otherwise assume not closed
+      const isClosed = m.closed === undefined ? false : m.closed;
+      return isActive && !isClosed;
+    });
+
+    logger.debug(`After active/closed filter: ${activeMarkets.length} markets`);
+
+    // Filter by category
+    const filteredMarkets = activeMarkets.filter(m => {
+      if (!category) return true;
+      const text = `${m.question || ''} ${m.description || ''}`.toLowerCase();
+      const matches = text.includes(category.toLowerCase());
+      if (!matches && activeMarkets.length <= 10) {
+        logger.debug(`Market "${m.question?.substring(0, 50)}..." does not match "${category}"`);
+      }
+      return matches;
+    });
+
+    logger.debug(`After category filter "${category}": ${filteredMarkets.length} markets`);
+
+    const markets: PolymarketMarket[] = filteredMarkets.map(m => {
         // Handle different token formats
         let yesPrice = 0;
         let noPrice = 0;
