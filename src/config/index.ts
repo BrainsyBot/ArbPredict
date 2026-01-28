@@ -23,10 +23,19 @@ export interface RiskConfig {
 
 export interface MatchingConfig {
   minConfidenceThreshold: number;
+  reviewConfidenceThreshold: number;
   exactMatchConfidence: number;
   fuzzyMatchMinSimilarity: number;
   requireDateValidation: boolean;
   requireCategoryMatch: boolean;
+  dateToleranceDays: number;
+  weights: {
+    keyword: number;
+    token: number;
+    fuzzy: number;
+    date: number;
+    category: number;
+  };
 }
 
 export interface SmallPositionConfig {
@@ -251,11 +260,20 @@ export function loadConfig(): Config {
     },
 
     matching: {
-      minConfidenceThreshold: 0.95,
+      minConfidenceThreshold: 0.75,  // Auto-approve threshold (was 0.95)
+      reviewConfidenceThreshold: 0.60, // Manual review threshold
       exactMatchConfidence: 1.0,
-      fuzzyMatchMinSimilarity: 0.95,
+      fuzzyMatchMinSimilarity: 0.50,  // Lowered - no longer primary method
       requireDateValidation: true,
-      requireCategoryMatch: true,
+      requireCategoryMatch: false,  // Too unreliable for Polymarket
+      dateToleranceDays: 7,  // Relaxed from 1 day
+      weights: {
+        keyword: 0.40,  // Semantic keywords - highest weight
+        token: 0.30,    // Word overlap
+        fuzzy: 0.15,    // Character similarity - reduced from primary
+        date: 0.10,     // Timeline alignment
+        category: 0.05, // Optional validation
+      },
     },
 
     smallPosition: {
