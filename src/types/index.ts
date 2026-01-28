@@ -4,7 +4,7 @@ export type Platform = 'polymarket' | 'kalshi';
 export type OrderSide = 'buy' | 'sell';
 export type OrderType = 'FOK' | 'GTC' | 'GTD';
 export type OperatingMode = 'dry_run' | 'live';
-export type MatchMethod = 'exact' | 'fuzzy' | 'manual';
+export type MatchMethod = 'exact' | 'fuzzy' | 'manual' | 'keyword' | 'token' | 'combined';
 export type AlertLevel = 'critical' | 'high' | 'medium';
 
 export type FailureType =
@@ -51,6 +51,9 @@ export interface PolymarketMarket extends BaseMarket {
     no: string;
   };
   liquidity: number;
+  category?: string;
+  yesPrice?: number;
+  noPrice?: number;
 }
 
 export interface KalshiMarket extends BaseMarket {

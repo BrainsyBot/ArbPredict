@@ -6,10 +6,10 @@
  * 2. Semantic keywords (0.8-1.0)
  * 3. Token overlap with synonyms (0.6-0.9)
  * 4. Fuzzy string similarity (0.5-0.8)
- * 5. LLM validation (optional, expensive)
+ * 5. LLM validation (optional, expensive) - commented out for now
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+// import Anthropic from '@anthropic-ai/sdk';  // Optional - uncomment if using LLM validation
 
 // ============================================
 // 1. SEMANTIC KEYWORD MATCHING
@@ -308,7 +308,11 @@ function calculateMatchScore(
 /**
  * Use Claude to validate if two markets are equivalent
  * Expensive but highly accurate for edge cases
+ * 
+ * COMMENTED OUT: Requires @anthropic-ai/sdk package
+ * Uncomment and install package if you want to use LLM validation
  */
+/*
 async function validateWithLLM(
   polymarket: { title: string; endDate: Date },
   kalshi: { title: string; expirationTime: Date }
@@ -360,6 +364,7 @@ Respond in JSON format:
   // Fallback: uncertain
   return { equivalent: false, confidence: 0.5, reasoning: 'LLM validation failed' };
 }
+*/
 
 // ============================================
 // 5. RECOMMENDED MATCHING WORKFLOW
@@ -522,7 +527,7 @@ function levenshteinDistance(s1: string, s2: string): number {
 export {
   calculateMatchScore,
   findBestMatch,
-  validateWithLLM,
+  // validateWithLLM,  // Commented out - requires @anthropic-ai/sdk
   keywordOverlapScore,
   tokenOverlapScore,
 };

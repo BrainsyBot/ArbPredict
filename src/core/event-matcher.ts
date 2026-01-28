@@ -9,24 +9,11 @@ import { getConfig } from '../config/index.js';
 import { query } from '../db/index.js';
 import { createChildLogger } from '../utils/logger.js';
 import {
-  normalize,
-  levenshteinSimilarity,
-  datesMatch,
   generateId,
 } from '../utils/helpers.js';
 import { calculateMatchScore } from '../utils/enhanced-matching.js';
 
 const logger = createChildLogger('event-matcher');
-
-// Category mappings between platforms
-const CATEGORY_MAPPINGS: Record<string, string[]> = {
-  politics: ['politics', 'elections', 'government', 'political'],
-  economics: ['economics', 'fed', 'economy', 'financial', 'finance'],
-  crypto: ['crypto', 'cryptocurrency', 'bitcoin', 'btc', 'ethereum', 'eth'],
-  sports: ['sports', 'nfl', 'nba', 'mlb', 'soccer', 'football'],
-  entertainment: ['entertainment', 'media', 'movies', 'oscars', 'awards'],
-  science: ['science', 'tech', 'technology', 'space', 'climate'],
-};
 
 /**
  * Event matching service
@@ -158,27 +145,7 @@ export class EventMatcher {
     return mapping;
   }
 
-  /**
-   * Check if categories are compatible
-   */
-  private categoriesCompatible(polymarketTitle: string, kalshiCategory: string): boolean {
-    const normalizedTitle = normalize(polymarketTitle);
-    const normalizedCategory = normalize(kalshiCategory);
-
-    // Find the category group for Kalshi
-    for (const [_group, keywords] of Object.entries(CATEGORY_MAPPINGS)) {
-      const kalshiInGroup = keywords.some(kw => normalizedCategory.includes(kw));
-
-      if (kalshiInGroup) {
-        // Check if Polymarket title contains any keyword from this group
-        const polyInGroup = keywords.some(kw => normalizedTitle.includes(kw));
-        return polyInGroup;
-      }
-    }
-
-    // If category not recognized, allow the match
-    return true;
-  }
+  // categoriesCompatible method removed - no longer used with enhanced matching
 
   /**
    * Create an event mapping
