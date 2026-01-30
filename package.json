@@ -19,7 +19,8 @@
     "discover:crypto": "tsx src/scripts/auto-discover.ts --preview --crypto",
     "discover:dry-run": "tsx src/scripts/auto-discover.ts --dry-run",
     "discover:preview": "tsx src/scripts/auto-discover.ts --preview",
-    "discover:list-series": "tsx src/scripts/auto-discover.ts --list-series"
+    "discover:list-series": "tsx src/scripts/auto-discover.ts --list-series",
+    "build-mappings": "tsx src/scripts/build-mappings-file.ts"
   },
   "keywords": [
     "arbitrage",

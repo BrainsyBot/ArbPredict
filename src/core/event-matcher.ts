@@ -24,7 +24,7 @@ export class EventMatcher {
   private cachedMappings: Map<string, EventMapping> = new Map();
 
   /**
-   * Load manual mappings from database
+   * Load manual mappings from database (or JSON file as fallback)
    */
   async loadMappings(): Promise<void> {
     try {
@@ -62,9 +62,51 @@ export class EventMatcher {
         this.manualMappings.set(row.polymarket_condition_id, row.kalshi_ticker);
       }
 
-      logger.info('Loaded event mappings', { count: result.rows.length });
+      logger.info('Loaded event mappings from database', { count: result.rows.length });
     } catch (error) {
-      logger.error('Failed to load mappings', { error: (error as Error).message });
+      logger.error('Failed to load mappings from database', { error: (error as Error).message });
+      
+      // Fallback: try loading from JSON file
+      try {
+        logger.info('Attempting to load mappings from JSON file...');
+        const { readFileSync, existsSync } = await import('fs');
+        const { resolve } = await import('path');
+        
+        const jsonPath = resolve('./data/event_mappings.json');
+        if (!existsSync(jsonPath)) {
+          logger.warn('No JSON mappings file found. Run "npm run build-mappings" to generate.');
+          return;
+        }
+
+        const fileContent = readFileSync(jsonPath, 'utf-8');
+        const data = JSON.parse(fileContent);
+        
+        for (const row of data.mappings) {
+          const mapping: EventMapping = {
+            id: row.id,
+            polymarketConditionId: row.polymarketConditionId,
+            kalshiTicker: row.kalshiTicker,
+            eventDescription: row.eventDescription,
+            matchConfidence: row.matchConfidence,
+            resolutionDate: new Date(row.resolutionDate),
+            matchMethod: row.matchMethod as MatchMethod,
+            outcomeMapping: row.outcomeMapping || [],
+            isActive: row.isActive !== false,
+            createdAt: new Date(data.generated),
+            updatedAt: new Date(data.generated),
+          };
+
+          this.cachedMappings.set(row.polymarketConditionId, mapping);
+          this.manualMappings.set(row.polymarketConditionId, row.kalshiTicker);
+        }
+
+        logger.info('Loaded event mappings from JSON file', { 
+          count: data.mappings.length,
+          generated: data.generated 
+        });
+      } catch (jsonError) {
+        logger.error('Failed to load mappings from JSON', { error: (jsonError as Error).message });
+      }
     }
   }
 
@@ -86,6 +128,7 @@ export class EventMatcher {
 
     // Track the best match using enhanced multi-method scoring
     let bestMatch: { kalshi: KalshiMarket; score: ReturnType<typeof calculateMatchScore> } | null = null;
+    const topScores: Array<{ ticker: string; score: number }> = [];
 
     for (const kalshi of kalshiMarkets) {
       // Calculate comprehensive match score using multiple methods
@@ -101,6 +144,11 @@ export class EventMatcher {
           category: kalshi.category,
         }
       );
+
+      // Track top scores for debugging (first event only)
+      if (topScores.length < 100) {
+        topScores.push({ ticker: kalshi.ticker, score: score.overall });
+      }
 
       // Skip if below review threshold
       if (score.overall < config.matching.reviewConfidenceThreshold) {
@@ -126,6 +174,12 @@ export class EventMatcher {
 
     // No match above minimum threshold
     if (!bestMatch) {
+      // Log top 3 scores for first few failures (debugging)
+      if (topScores.length > 0) {
+        const sorted = topScores.sort((a, b) => b.score - a.score).slice(0, 3);
+        const topScoresStr = sorted.map(s => `${s.ticker}:${(s.score * 100).toFixed(1)}%`).join(', ');
+        console.log(`✗ "${polymarket.title.substring(0, 60)}..." | Threshold: ${(config.matching.reviewConfidenceThreshold * 100).toFixed(0)}% | Top: ${topScoresStr}`);
+      }
       return null;
     }
 
@@ -311,11 +365,19 @@ export class EventMatcher {
     kalshiMarkets: KalshiMarket[]
   ): Promise<EventMapping[]> {
     const mappings: EventMapping[] = [];
+    let totalChecked = 0;
+    let aboveThreshold = 0;
 
     for (const polymarket of polymarketMarkets) {
+      totalChecked++;
       const mapping = await this.findKalshiEquivalent(polymarket, kalshiMarkets);
       if (mapping) {
+        aboveThreshold++;
         mappings.push(mapping);
+        console.log(`✓ Match #${aboveThreshold}: ${polymarket.title.substring(0, 60)}... → ${mapping.kalshiTicker} (${(mapping.matchConfidence * 100).toFixed(1)}%)`);
+      } else if (totalChecked <= 5) {
+        // Log first 5 failures for debugging
+        console.log(`✗ No match for: ${polymarket.title.substring(0, 80)}...`);
       }
     }
 
@@ -323,6 +385,7 @@ export class EventMatcher {
       polymarketCount: polymarketMarkets.length,
       kalshiCount: kalshiMarkets.length,
       mappingsFound: mappings.length,
+      aboveThreshold,
     });
 
     return mappings;
