@@ -85,7 +85,10 @@ export class CryptoExecutor {
    */
   async checkAndExecute(): Promise<void> {
     try {
-      // 1. Generate signal
+      // 1. Monitor and close existing positions first
+      await this.monitorPositions();
+
+      // 2. Generate signal for new trades
       const signal = await this.strategy.generateSignal();
       
       if (signal.direction === 'NEUTRAL') {
@@ -200,11 +203,32 @@ export class CryptoExecutor {
    * Monitor open positions and check exit conditions
    */
   async monitorPositions(): Promise<void> {
+    if (this.positions.size === 0) {
+      return;
+    }
+
+    logger.info(`Monitoring ${this.positions.size} open position(s)`);
+
     for (const position of this.positions.values()) {
       if (position.status !== 'OPEN') continue;
 
-      // Update current price (simplified - would query orderbook in production)
-      // position.currentPrice = await this.getMarketPrice(position.trade.market);
+      // Update current price
+      if (this.config.paperTrading) {
+        // Simulate price movement in paper trading
+        const timeRemaining = this.scanner.getTimeRemaining(position.trade.market);
+        if (timeRemaining < 60) {
+          // Market about to close - simulate resolution
+          position.currentPrice = Math.random() > 0.5 ? 0.95 : 0.05;
+        } else {
+          // Simulate small price movements
+          const volatility = 0.05;
+          const change = (Math.random() - 0.5) * volatility;
+          position.currentPrice = Math.max(0.05, Math.min(0.95, position.currentPrice + change));
+        }
+      } else {
+        // In live trading, fetch real price
+        // position.currentPrice = await this.getMarketPrice(position.trade.market);
+      }
 
       // Check take profit
       if (position.currentPrice >= this.config.takeProfitThreshold) {
