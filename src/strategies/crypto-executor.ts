@@ -57,7 +57,7 @@ export class CryptoExecutor {
       maxPositionSize: 0.05, // 5%
       maxConcurrentPositions: 10,
       takeProfitThreshold: 0.90,
-      stopLossThreshold: 0.20,
+      stopLossThreshold: 0.30, // Cut losses faster
       minSignalConfidence: 2,
       paperTrading: true, // Start in paper trading mode
       ...config,
